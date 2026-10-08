@@ -42,3 +42,8 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT single_profile CHECK (id = 1)
 );
+
+-- Token OAuth per riuso sessione (evitano login + MFA a ogni sync).
+-- Sicuri da rieseguire anche se la tabella esiste già:
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth1_token TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth2_token TEXT;

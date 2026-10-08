@@ -163,13 +163,27 @@ function render(list) {
     options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: 6 } }, y: { ticks: { color: '#94a3b8' } } } } });
 }
 
+async function doSync(mfaCode) {
+  const r = await fetch('/api/sync?limit=20', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(mfaCode ? { mfa_code: mfaCode } : {})
+  });
+  return { status: r.status, body: await r.json() };
+}
+
 $('btnSync').onclick = async () => {
   showAlert('Sync in corso (può durare ~30s)...');
   try {
-    const r = await fetch('/api/sync?limit=20', { method: 'POST' });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'sync failed');
-    showAlert(`Sync OK: ${j.fetched} scaricate dal Garmin.`);
+    let { status, body } = await doSync();
+    // Garmin chiede MFA: prompt del codice ricevuto via email e secondo tentativo
+    if (status === 428 && body.mfa_required) {
+      const code = prompt('Garmin richiede il codice MFA (controlla la tua email):');
+      if (!code) throw new Error('MFA annullata: codice non inserito.');
+      showAlert('Verifica MFA in corso...');
+      ({ status, body } = await doSync(code));
+    }
+    if (status !== 200) throw new Error(body.error || 'sync failed');
+    showAlert(`Sync OK: ${body.fetched} scaricate da Garmin.`);
     load();
   } catch (e) { showAlert('Errore sync: ' + e.message, false); }
 };

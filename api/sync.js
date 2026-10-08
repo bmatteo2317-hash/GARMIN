@@ -64,8 +64,14 @@ module.exports = async function handler(req, res) {
   const limit = Math.min(parseInt((req.query && req.query.limit) || '20', 10) || 20, 100);
   // Override manuale: POST { garmin_email, garmin_password } (usato dal pulsante sync
   // quando le credenziali sono salvate nel Profilo e non nelle env vars)
-  const bodyEmail = req.body && req.body.garmin_email;
-  const bodyPass = req.body && req.body.garmin_password;
+  // Body JSON (Vercel lo parsifica già; fallback se arriva come stringa)
+  let body = req.body || {};
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (e) { body = {}; }
+  }
+  const bodyEmail = body.garmin_email || (req.query && req.query.garmin_email);
+  const bodyPass = body.garmin_password || (req.query && req.query.garmin_password);
+  const mfaCode = body.mfa_code || (req.query && req.query.mfa_code) || null;
   const sql = neon(DATABASE_URL);
 
   try {
@@ -82,16 +88,27 @@ module.exports = async function handler(req, res) {
       id SERIAL PRIMARY KEY, date DATE UNIQUE NOT NULL,
       steps INT, distance_m DOUBLE PRECISION, calories INT, resting_hr INT
     )`;
+    // Tabella profili (anche token OAuth per saltare login+MFA alle sync successive)
+    await sql`CREATE TABLE IF NOT EXISTS profiles (
+      id INT PRIMARY KEY DEFAULT 1, garmin_email TEXT, garmin_password TEXT,
+      oauth1_token TEXT, oauth2_token TEXT, updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`;
+    await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth1_token TEXT`;
+    await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth2_token TEXT`;
 
     // 2. Risolvi credenziali: body > tabella profiles > env vars
     let GARMIN_EMAIL = bodyEmail || null;
     let GARMIN_PASSWORD = bodyPass || null;
+    let savedOauth1 = null;
+    let savedOauth2 = null;
     if (!GARMIN_EMAIL || !GARMIN_PASSWORD) {
       try {
-        const prof = await sql`SELECT garmin_email, garmin_password FROM profiles WHERE id = 1`;
+        const prof = await sql`SELECT garmin_email, garmin_password, oauth1_token, oauth2_token FROM profiles WHERE id = 1`;
         if (prof[0] && prof[0].garmin_email && prof[0].garmin_password) {
           GARMIN_EMAIL = prof[0].garmin_email;
           GARMIN_PASSWORD = prof[0].garmin_password;
+          savedOauth1 = prof[0].oauth1_token || null;
+          savedOauth2 = prof[0].oauth2_token || null;
         }
       } catch (e) { /* tabella assente alla prima sync: si usa il fallback env */ }
     }
@@ -104,12 +121,47 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 3. Login Garmin (libreria unofficial garmin-connect)
+    // 3. Login Garmin (libreria @flow-js/garmin-connect)
     const GC = new GarminConnect({ username: GARMIN_EMAIL, password: GARMIN_PASSWORD });
-    await GC.login();
-    const activities = (await GC.getActivities(0, limit)) || [];
+    let activities = null;
 
-    // 3. Upsert attività
+    // 3a. Riuso token OAuth salvati (salta login e MFA se ancora validi)
+    if (savedOauth1 && savedOauth2 && !mfaCode) {
+      try {
+        GC.loadToken(JSON.parse(savedOauth1), JSON.parse(savedOauth2));
+        activities = (await GC.getActivities(0, limit)) || [];
+      } catch (e) {
+        activities = null; // token scaduti: si passa al login fresco
+      }
+    }
+
+    // 3b. Login fresco; se Garmin chiede MFA serve mfa_code (dal body).
+    // La libreria lo richiede via opzione mfaHandler: senza, lancia
+    // "MFA required but no mfaHandler provided".
+    if (!activities) {
+      try {
+        await GC.login(undefined, undefined,
+          mfaCode ? { mfaHandler: async () => String(mfaCode).trim() } : undefined);
+      } catch (e) {
+        if (/mfa/i.test((e && e.message) || '')) {
+          return res.status(428).json({
+            mfa_required: true,
+            error: 'Garmin richiede il codice MFA (inviato via email).',
+            hint: 'Ripeti la sync passando il codice: POST /api/sync { "mfa_code": "123456" }.'
+          });
+        }
+        throw e;
+      }
+      // Salva i token per le prossime sync (niente più MFA finché validi)
+      try {
+        const tokens = GC.exportToken();
+        await sql`UPDATE profiles SET oauth1_token = ${JSON.stringify(tokens.oauth1)},
+          oauth2_token = ${JSON.stringify(tokens.oauth2)}, updated_at = NOW() WHERE id = 1`;
+      } catch (e) { /* salvataggio token non bloccante */ }
+      activities = (await GC.getActivities(0, limit)) || [];
+    }
+
+    // 4. Upsert attività
     let saved = 0;
     for (const a of activities) {
       const pace = toPaceMinKm(a);
@@ -145,7 +197,7 @@ module.exports = async function handler(req, res) {
         status === 429
           ? 'Rate-limit Garmin: riprova tra qualche ora, riduci la frequenza del Cron.'
           : status === 428
-            ? 'Garmin chiede MFA: fai un login manuale una volta, poi riprova.'
+            ? 'Garmin chiede il codice MFA (email): ripeti la sync con { "mfa_code": "123456" } dal popup della dashboard.'
             : 'Controlla le env su Vercel e i log della function.'
     });
   }
