@@ -11,7 +11,7 @@
  * token su disco come nel progetto Flask locale. Facciamo login
  * a ogni sync (1 volta/giorno = nessun rate-limit).
  */
-const { GarminConnect } = require('garmin-connect');
+const { GarminConnect } = require('@flow-js/garmin-connect');
 const { neon } = require('@neondatabase/serverless');
 
 const SCHEMA_SQL = `
