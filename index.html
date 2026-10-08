@@ -182,7 +182,12 @@ $('btnSync').onclick = async () => {
       showAlert('Verifica MFA in corso...');
       ({ status, body } = await doSync(code));
     }
-    if (status !== 200) throw new Error(body.error || 'sync failed');
+    if (status !== 200) {
+      const extra = body.hint ? ' — ' + body.hint : '';
+      const wait = body.retry_after_seconds
+        ? ` (riprova tra ${Math.ceil(body.retry_after_seconds / 60)} min)` : '';
+      throw new Error((body.error || 'sync failed') + wait + extra);
+    }
     showAlert(`Sync OK: ${body.fetched} scaricate da Garmin.`);
     load();
   } catch (e) { showAlert('Errore sync: ' + e.message, false); }

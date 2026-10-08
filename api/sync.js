@@ -95,6 +95,7 @@ module.exports = async function handler(req, res) {
     )`;
     await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth1_token TEXT`;
     await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth2_token TEXT`;
+    await sql`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_garmin_call TIMESTAMPTZ`;
 
     // 2. Risolvi credenziali: body > tabella profiles > env vars
     let GARMIN_EMAIL = bodyEmail || null;
@@ -120,6 +121,31 @@ module.exports = async function handler(req, res) {
         hint: 'Apri la sezione Profilo nella dashboard e salva email + password Garmin.'
       });
     }
+
+    // 2b. Cooldown anti-429: max 1 chiamata a Garmin ogni 10 minuti.
+    // Le function Vercel condividono gli IP in uscita: i retry ravvicinati
+    // (specie dopo MFA fallite) fanno scattare il ban di Garmin e lo allungano.
+    // Il retry con mfa_code è sempre consentito: completa un login già iniziato.
+    const COOLDOWN_S = 600;
+    if (!mfaCode) {
+      try {
+        const p = await sql`SELECT last_garmin_call FROM profiles WHERE id = 1`;
+        const last = p[0] && p[0].last_garmin_call ? new Date(p[0].last_garmin_call) : null;
+        if (last && (Date.now() - last.getTime()) / 1000 < COOLDOWN_S) {
+          const wait = Math.ceil(COOLDOWN_S - (Date.now() - last.getTime()) / 1000);
+          return res.status(429).json({
+            error: `Troppe sync ravvicinate. Riprova tra ${Math.ceil(wait / 60)} min.`,
+            retry_after_seconds: wait,
+            hint: 'Cooldown locale: Garmin non è stato contattato.'
+          });
+        }
+      } catch (e) { /* prima sync: nessun cooldown */ }
+    }
+    // Marca il tentativo PRIMA di chiamare Garmin (anche i fallimenti contano)
+    try {
+      await sql`INSERT INTO profiles (id, last_garmin_call) VALUES (1, NOW())
+        ON CONFLICT (id) DO UPDATE SET last_garmin_call = NOW()`;
+    } catch (e) { /* non bloccante */ }
 
     // 3. Login Garmin (libreria @flow-js/garmin-connect)
     const GC = new GarminConnect({ username: GARMIN_EMAIL, password: GARMIN_PASSWORD });
@@ -195,7 +221,7 @@ module.exports = async function handler(req, res) {
       error: msg,
       hint:
         status === 429
-          ? 'Rate-limit Garmin: riprova tra qualche ora, riduci la frequenza del Cron.'
+          ? 'Ban temporaneo di Garmin (può durare 1-24h). NON riprovare a raffica: attendi almeno 1h, poi fai UNA sola sync. Il riuso token eviterà nuovi login frequenti.'
           : status === 428
             ? 'Garmin chiede il codice MFA (email): ripeti la sync con { "mfa_code": "123456" } dal popup della dashboard.'
             : 'Controlla le env su Vercel e i log della function.'

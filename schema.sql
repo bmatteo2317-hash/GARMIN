@@ -47,3 +47,5 @@ CREATE TABLE IF NOT EXISTS profiles (
 -- Sicuri da rieseguire anche se la tabella esiste già:
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth1_token TEXT;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS oauth2_token TEXT;
+-- Timestamp ultima chiamata a Garmin (cooldown anti-429 in api/sync.js)
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_garmin_call TIMESTAMPTZ;
