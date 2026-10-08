@@ -11,14 +11,53 @@
   <nav class="border-b border-white/10 bg-slate-900/80 sticky top-0 backdrop-blur">
     <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
       <span class="font-bold text-lg">🏃 Garmin Dashboard <span class="text-xs font-normal text-slate-400">Vercel + Neon</span></span>
-      <button id="btnSync" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm">
-        🔄 Sincronizza ora
-      </button>
+      <div class="flex gap-2">
+        <button id="btnProfile" class="bg-slate-700 hover:bg-slate-600 font-semibold px-4 py-2 rounded-lg text-sm">
+          👤 Profilo
+        </button>
+        <button id="btnLogout" class="hidden bg-slate-700 hover:bg-slate-600 font-semibold px-3 py-2 rounded-lg text-sm" title="Esci">
+          ⎋
+        </button>
+        <button id="btnSync" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm">
+          🔄 Sincronizza ora
+        </button>
+      </div>
     </div>
   </nav>
 
+  <!-- Login gate (mostrato solo se PROFILE_PIN impostata su Vercel) -->
+  <div id="loginGate" class="hidden fixed inset-0 z-50 bg-slate-950/95 flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-white/10 rounded-xl p-6 w-full max-w-sm space-y-4">
+      <h2 class="font-bold text-lg">🔐 Accedi</h2>
+      <p class="text-sm text-slate-400">Inserisci il PIN per aprire la dashboard.</p>
+      <input id="loginPin" type="password" inputmode="numeric" placeholder="PIN"
+        class="w-full bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-500" />
+      <button id="btnLogin" class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm">
+        Accedi
+      </button>
+      <p id="loginErr" class="hidden text-sm text-red-300"></p>
+    </div>
+  </div>
+
   <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
     <div id="alert" class="hidden text-sm px-4 py-2 rounded-lg"></div>
+
+    <!-- Profilo Garmin (nascosta finché non premi 👤 Profilo) -->
+    <div id="profileCard" class="hidden bg-slate-900 border border-white/10 rounded-xl p-4 space-y-3">
+      <h2 class="font-semibold">👤 Profilo — credenziali Garmin</h2>
+      <p class="text-xs text-slate-400">Salvate nella tabella <code>profiles</code> su Neon e usate dalla sync al posto delle env vars. <span id="profileStatus" class="text-slate-300"></span></p>
+      <div class="grid md:grid-cols-3 gap-2">
+        <input id="garminEmail" type="email" placeholder="GARMIN_EMAIL" autocomplete="username"
+          class="bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-500" />
+        <input id="garminPassword" type="password" placeholder="GARMIN_PASSWORD" autocomplete="current-password"
+          class="bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-500" />
+        <input id="profilePin" type="password" placeholder="PIN (solo se richiesto)"
+          class="bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-500" />
+      </div>
+      <button id="btnSaveProfile" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm">
+        💾 Salva credenziali
+      </button>
+    </div>
 
     <!-- KPI -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -135,7 +174,70 @@ $('btnSync').onclick = async () => {
   } catch (e) { showAlert('Errore sync: ' + e.message, false); }
 };
 
-load();
+// --- Login gate + Profilo ---
+const AUTH_KEY = 'garmin_auth';
+const isAuthed = () => sessionStorage.getItem(AUTH_KEY) === '1';
+
+async function initGate() {
+  try {
+    const r = await fetch('/api/profile?action=status');
+    const j = await r.json();
+    if (j.email_masked) $('profileStatus').textContent = 'Configurato: ' + j.email_masked;
+    if (j.pin_required && !isAuthed()) {
+      $('loginGate').classList.remove('hidden');
+      $('btnLogout').classList.add('hidden');
+    } else {
+      load();
+    }
+    if (j.pin_required) $('btnLogout').classList.remove('hidden');
+  } catch (e) { load(); }
+}
+
+$('btnLogin').onclick = async () => {
+  const pin = $('loginPin').value;
+  $('loginErr').classList.add('hidden');
+  try {
+    const r = await fetch('/api/profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'login', pin })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'login failed');
+    sessionStorage.setItem(AUTH_KEY, '1');
+    $('loginGate').classList.add('hidden');
+    $('btnLogout').classList.remove('hidden');
+    load();
+  } catch (e) {
+    const el = $('loginErr');
+    el.textContent = e.message;
+    el.classList.remove('hidden');
+  }
+};
+$('loginPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnLogin').click(); });
+
+$('btnProfile').onclick = () => $('profileCard').classList.toggle('hidden');
+$('btnLogout').onclick = () => { sessionStorage.removeItem(AUTH_KEY); location.reload(); };
+
+$('btnSaveProfile').onclick = async () => {
+  try {
+    const r = await fetch('/api/profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'save',
+        garmin_email: $('garminEmail').value,
+        garmin_password: $('garminPassword').value,
+        pin: $('profilePin').value || $('loginPin').value || ''
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'save failed');
+    $('garminPassword').value = '';
+    $('profileStatus').textContent = 'Configurato: ' + (j.email_masked || '');
+    showAlert('Profilo salvato. Ora premi Sincronizza ora.');
+  } catch (e) { showAlert('Errore salvataggio profilo: ' + e.message, false); }
+};
+
+initGate();
 </script>
 </body>
 </html>

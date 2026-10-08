@@ -4,8 +4,13 @@
  * Chiamala con:  POST /api/sync  oppure  GET /api/sync?limit=20
  * Vercel Cron la richiama ogni giorno alle 06:00 (vedi vercel.json).
  *
+ * Credenziali Garmin (ordine di priorità):
+ *   1. tabella `profiles` (riga id=1) impostata dalla sezione Profilo
+ *   2. env vars GARMIN_EMAIL / GARMIN_PASSWORD (per Vercel Cron)
+ *
  * Env richieste su Vercel:
- *   DATABASE_URL, GARMIN_EMAIL, GARMIN_PASSWORD
+ *   DATABASE_URL (+ GARMIN_EMAIL/GARMIN_PASSWORD come fallback,
+ *   oppure PROFILE_PIN opzionale per proteggere login e Profilo)
  *
  * Nota serverless: il filesystem è effimero, quindi NON salviamo
  * token su disco come nel progetto Flask locale. Facciamo login
@@ -51,14 +56,16 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.status(405).json({ error: 'Usa GET o POST' });
   }
-  const { DATABASE_URL, GARMIN_EMAIL, GARMIN_PASSWORD } = process.env;
-  if (!DATABASE_URL || !GARMIN_EMAIL || !GARMIN_PASSWORD) {
-    return res.status(500).json({
-      error: 'Variabili mancanti. Configura DATABASE_URL, GARMIN_EMAIL, GARMIN_PASSWORD su Vercel.'
-    });
+  const { DATABASE_URL } = process.env;
+  if (!DATABASE_URL) {
+    return res.status(500).json({ error: 'Variabile mancante. Configura DATABASE_URL su Vercel.' });
   }
 
   const limit = Math.min(parseInt((req.query && req.query.limit) || '20', 10) || 20, 100);
+  // Override manuale: POST { garmin_email, garmin_password } (usato dal pulsante sync
+  // quando le credenziali sono salvate nel Profilo e non nelle env vars)
+  const bodyEmail = req.body && req.body.garmin_email;
+  const bodyPass = req.body && req.body.garmin_password;
   const sql = neon(DATABASE_URL);
 
   try {
@@ -76,7 +83,28 @@ module.exports = async function handler(req, res) {
       steps INT, distance_m DOUBLE PRECISION, calories INT, resting_hr INT
     )`;
 
-    // 2. Login Garmin (libreria unofficial garmin-connect)
+    // 2. Risolvi credenziali: body > tabella profiles > env vars
+    let GARMIN_EMAIL = bodyEmail || null;
+    let GARMIN_PASSWORD = bodyPass || null;
+    if (!GARMIN_EMAIL || !GARMIN_PASSWORD) {
+      try {
+        const prof = await sql`SELECT garmin_email, garmin_password FROM profiles WHERE id = 1`;
+        if (prof[0] && prof[0].garmin_email && prof[0].garmin_password) {
+          GARMIN_EMAIL = prof[0].garmin_email;
+          GARMIN_PASSWORD = prof[0].garmin_password;
+        }
+      } catch (e) { /* tabella assente alla prima sync: si usa il fallback env */ }
+    }
+    GARMIN_EMAIL = GARMIN_EMAIL || process.env.GARMIN_EMAIL;
+    GARMIN_PASSWORD = GARMIN_PASSWORD || process.env.GARMIN_PASSWORD;
+    if (!GARMIN_EMAIL || !GARMIN_PASSWORD) {
+      return res.status(428).json({
+        error: 'Credenziali Garmin non configurate.',
+        hint: 'Apri la sezione Profilo nella dashboard e salva email + password Garmin.'
+      });
+    }
+
+    // 3. Login Garmin (libreria unofficial garmin-connect)
     const GC = new GarminConnect({ username: GARMIN_EMAIL, password: GARMIN_PASSWORD });
     await GC.login();
     const activities = (await GC.getActivities(0, limit)) || [];
