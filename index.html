@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Garmin Dashboard — Vercel + Neon</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <nav class="border-b border-white/10 bg-slate-900/80 sticky top-0 backdrop-blur">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+      <span class="font-bold text-lg">🏃 Garmin Dashboard <span class="text-xs font-normal text-slate-400">Vercel + Neon</span></span>
+      <button id="btnSync" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm">
+        🔄 Sincronizza ora
+      </button>
+    </div>
+  </nav>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <div id="alert" class="hidden text-sm px-4 py-2 rounded-lg"></div>
+
+    <!-- KPI -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="bg-slate-900 border border-white/10 rounded-xl p-4">
+        <div class="text-xs text-slate-400">Attività (ultime 20)</div>
+        <div id="kpiCount" class="text-2xl font-bold">–</div>
+      </div>
+      <div class="bg-slate-900 border border-white/10 rounded-xl p-4">
+        <div class="text-xs text-slate-400">Km totali</div>
+        <div id="kpiKm" class="text-2xl font-bold">–</div>
+      </div>
+      <div class="bg-slate-900 border border-white/10 rounded-xl p-4">
+        <div class="text-xs text-slate-400">FC media</div>
+        <div id="kpiHr" class="text-2xl font-bold">–</div>
+      </div>
+      <div class="bg-slate-900 border border-white/10 rounded-xl p-4">
+        <div class="text-xs text-slate-400">Ultima attività</div>
+        <div id="kpiLast" class="text-sm font-semibold">–</div>
+      </div>
+    </div>
+
+    <!-- Grafici -->
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="bg-slate-900 border border-white/10 rounded-xl p-4">
+        <h2 class="font-semibold mb-2">Chilometraggio per data</h2>
+        <canvas id="chKm" height="220"></canvas>
+      </div>
+      <div class="bg-slate-900 border border-white/10 rounded-xl p-4">
+        <h2 class="font-semibold mb-2">Frequenza cardiaca media</h2>
+        <canvas id="chHr" height="220"></canvas>
+      </div>
+    </div>
+
+    <!-- Tabella -->
+    <div class="bg-slate-900 border border-white/10 rounded-xl p-4 overflow-x-auto">
+      <h2 class="font-semibold mb-3">Attività recenti</h2>
+      <table class="w-full text-sm">
+        <thead class="text-slate-400 text-left">
+          <tr>
+            <th class="py-2 pr-3">Data</th><th class="pr-3">Nome</th><th class="pr-3">Tipo</th>
+            <th class="pr-3">Km</th><th class="pr-3">Min</th><th class="pr-3">Passo</th>
+            <th class="pr-3">FC med</th><th class="pr-3">FC max</th><th>Kcal</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <p class="text-xs text-slate-500">I dati sono letti da Neon PostgreSQL via <code>/api/activities</code>. La sync interroga Garmin 1 volta/giorno via Cron + pulsante manuale.</p>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let chartKm, chartHr;
+
+function showAlert(msg, ok = true) {
+  const el = $('alert');
+  el.classList.remove('hidden');
+  el.className = 'text-sm px-4 py-2 rounded-lg ' + (ok ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300');
+  el.textContent = msg;
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/activities?limit=20');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'API error');
+    render(j.activities || []);
+  } catch (e) {
+    showAlert('Errore caricamento: ' + e.message + ' — hai fatto la prima sync?', false);
+  }
+}
+
+function render(list) {
+  const kmTot = list.reduce((s, a) => s + (Number(a.distance_m) || 0), 0) / 1000;
+  const hrs = list.map(a => a.avg_hr).filter(Boolean);
+  $('kpiCount').textContent = list.length;
+  $('kpiKm').textContent = kmTot.toFixed(1) + ' km';
+  $('kpiHr').textContent = hrs.length ? Math.round(hrs.reduce((a,b)=>a+b,0)/hrs.length) + ' bpm' : '–';
+  $('kpiLast').textContent = list[0] ? (list[0].name + ' · ' + new Date(list[0].start_time).toLocaleDateString('it-IT')) : '–';
+
+  $('tbody').innerHTML = list.map(a => {
+    const km = ((Number(a.distance_m)||0)/1000).toFixed(2);
+    const min = ((Number(a.duration_s)||0)/60).toFixed(0);
+    const d = a.start_time ? new Date(a.start_time).toLocaleString('it-IT') : '–';
+    return `<tr class="border-t border-white/5">
+      <td class="py-2 pr-3 whitespace-nowrap">${d}</td>
+      <td class="pr-3">${a.name||''}</td><td class="pr-3 text-slate-400">${a.activity_type||''}</td>
+      <td class="pr-3">${km}</td><td class="pr-3">${min}</td>
+      <td class="pr-3">${a.avg_pace_min_km ? Number(a.avg_pace_min_km).toFixed(2) : '–'}</td>
+      <td class="pr-3">${a.avg_hr||'–'}</td><td class="pr-3">${a.max_hr||'–'}</td>
+      <td>${a.calories||'–'}</td></tr>`;
+  }).join('') || '<tr><td colspan="9" class="text-center py-4 text-slate-400">Nessuna attività — premi Sincronizza ora</td></tr>';
+
+  const chrono = [...list].reverse();
+  const labels = chrono.map(a => a.start_time ? new Date(a.start_time).toLocaleDateString('it-IT') : '?');
+  if (chartKm) chartKm.destroy();
+  if (chartHr) chartHr.destroy();
+  chartKm = new Chart($('chKm'), { type: 'bar',
+    data: { labels, datasets: [{ label: 'Km', data: chrono.map(a => ((Number(a.distance_m)||0)/1000).toFixed(2)) }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: 6 } }, y: { ticks: { color: '#94a3b8' } } } } });
+  chartHr = new Chart($('chHr'), { type: 'line',
+    data: { labels, datasets: [{ label: 'FC media', data: chrono.map(a => a.avg_hr || null), spanGaps: true, tension: 0.3 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: 6 } }, y: { ticks: { color: '#94a3b8' } } } } });
+}
+
+$('btnSync').onclick = async () => {
+  showAlert('Sync in corso (può durare ~30s)...');
+  try {
+    const r = await fetch('/api/sync?limit=20', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'sync failed');
+    showAlert(`Sync OK: ${j.fetched} scaricate dal Garmin.`);
+    load();
+  } catch (e) { showAlert('Errore sync: ' + e.message, false); }
+};
+
+load();
+</script>
+</body>
+</html>

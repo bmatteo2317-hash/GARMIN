@@ -1,0 +1,17 @@
+{
+  "name": "garmin-vercel-neon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dashboard Garmin Connect su Vercel + Neon PostgreSQL",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "garmin-connect": "^1.6.5",
+    "@neondatabase/serverless": "^0.9.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
